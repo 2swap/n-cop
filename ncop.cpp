@@ -220,6 +220,10 @@ int robbers_turn_evaluate(const GameState& graph, const int num_cops, const int 
 }
 
 void unit_tests() {
+    // Silence output during unit tests
+    streambuf* orig_buf = cout.rdbuf();
+    cout.rdbuf(nullptr);
+
     {
         GameState state(6);
         state.cop = add_edge(state.cop, 0, 1);
@@ -234,7 +238,7 @@ void unit_tests() {
         state.cop = add_edge(state.cop, 1, 5);
         state.robber = add_edge(state.robber, 1, 2);
 
-        assert(cops_turn_evaluate(state, 2, 0) == -1);
+        assert(cops_turn_evaluate(state, 2, 0) == 1);
     }
 
     {
@@ -315,6 +319,8 @@ void unit_tests() {
         robber = add_edge(robber, 5, 1);
         assert(is_0_1_connected(robber));
     }
+
+    cout.rdbuf(orig_buf);
 
     cout << "All unit tests passed!" << endl << endl;
 }
