@@ -12,38 +12,40 @@ If the cop can prevent the robber from connecting vertices 0 and 1, the cop wins
 #include <vector>
 #define TOP_LEFT 0x8000000000000000ULL
 
+#include <immintrin.h>
+
 using namespace std;
 
-typedef uint64_t Bitboard;
+typedef __m256i Bitboard;
 
 Bitboard get_cop_starting_bitboard_for_size_k_graph(int k) {
-    Bitboard v = 0ULL;
-    Bitboard h = 0ULL;
-    for(int i = k; i < 8; i++) {
-        v |= 1ULL << i;
-        h |= 1ULL << (i * 8);
+    uint16_t data[16] = {0};
+    for (int i = 0; i < k; i++) {
+        data[i] = (1 << k) - 1;
     }
-    v |= v << 8;
-    v |= v << 16;
-    v |= v << 32;
-    h |= h << 1;
-    h |= h << 2;
-    h |= h << 4;
-    return v | h;
+    return _mm256_xor_si256(_mm256_loadu_si256((__m256i const *) data), _mm256_set1_epi32(-1));
 }
 
 Bitboard add_edge(Bitboard graph, int u, int v) {
-    return graph | (1ULL << (u * 8 + v)) | (1ULL << (v * 8 + u));
+    uint16_t data[16] = {0};
+    data[u] |= 1 << v;
+    data[v] |= 1 << u;
+    return _mm256_or_si256(_mm256_loadu_si256((__m256i const *) data), graph);
 }
 
 Bitboard remove_edge(Bitboard graph, int u, int v) {
-    return graph & ~(1ULL << (u * 8 + v)) & ~(1ULL << (v * 8 + u));
+    uint16_t data[16] = {0};
+    data[u] |= 1 << v;
+    data[v] |= 1 << u;
+    return _mm256_andnot_si256(_mm256_loadu_si256((__m256i const *) data), graph);
 }
 
 void print_graph(Bitboard graph) {
-    for (int i = 7; i >= 0; i--) {
-        for (int j = 0; j < 8; j++) {
-            if (graph & (1ULL << (i * 8 + j))) {
+    uint16_t data[16];
+    _mm256_storeu_si256((__m256i *) data, graph);
+    for (int i = 15; i >= 0; i--) {
+        for (int j = 0; j < 16; j++) {
+            if (data[i] & (1ULL << j)) {
                 cout << "1 ";
             } else {
                 cout << "0 ";
@@ -55,35 +57,38 @@ void print_graph(Bitboard graph) {
 }
 
 bool has_edge(Bitboard graph, int u, int v) {
-    return graph & (1ULL << (u * 8 + v));
-}
-
-inline Bitboard make_row_stripes(Bitboard bb) {
-    bb |= bb >> 1;
-    bb |= bb >> 2;
-    bb |= bb >> 4;
-    return (bb & 0x0101010101010101ULL) * 0xffULL;
-}
-
-inline Bitboard make_col_stripes(Bitboard bb) {
-    bb |= bb >> 8  | bb << 8 ;
-    bb |= bb >> 16 | bb << 16;
-    bb |= bb >> 32 | bb << 32;
-    return bb;
+    uint16_t data[16];
+    _mm256_storeu_si256((__m256i *) data, graph);
+    return data[u] & (1ULL << v);
 }
 
 bool is_0_1_connected(Bitboard graph) {
-    Bitboard v_frontier = graph & 0x00000000000000ffULL;
-    while (true) {
-        Bitboard s_frontier = make_col_stripes(v_frontier);
-        Bitboard h_frontier = make_row_stripes(s_frontier & graph);
-        Bitboard new_v_frontier = h_frontier & graph;
+    uint16_t frontier = _mm256_extract_epi16(graph, 0);
+    uint16_t last = 0;
 
-        if(new_v_frontier == v_frontier) break;
-        v_frontier = new_v_frontier;
+    // fill out columns to frontier
+    __m256i matches = _mm256_set1_epi16(frontier);
+    while (last != frontier && !(frontier & 0x2)) {
+        // find rows that intersect with frontier
+        matches = _mm256_and_si256(matches, graph);
+        matches = _mm256_cmpeq_epi16(matches, _mm256_setzero_si256());
+        matches = _mm256_xor_si256(matches, _mm256_set1_epi32(-1));
+
+        // get their contents
+        matches = _mm256_and_si256(matches, graph);
+        if (_mm256_extract_epi16(matches, 1)) return true; // did we see the one row?
+
+        // merge into new columns
+        matches = _mm256_or_si256(_mm256_alignr_epi8(matches, matches, 2), matches);
+        matches = _mm256_or_si256(_mm256_alignr_epi8(matches, matches, 4), matches);
+        matches = _mm256_or_si256(_mm256_alignr_epi8(matches, matches, 8), matches);
+        matches = _mm256_or_si256(_mm256_alignr_epi8(matches, matches, 16), matches);
+
+        // forward propagate...
+        last = frontier;
+        frontier = _mm256_extract_epi16(matches, 0);
     }
-    return (v_frontier & 0x000000000000ff00) ||
-           (v_frontier & 0x0202020202020202);
+    return frontier & 0x2;
 }
 
 struct GameState {
@@ -95,7 +100,7 @@ struct GameState {
     GameState(const int gs) {
         graph_size = gs;
         cop = get_cop_starting_bitboard_for_size_k_graph(graph_size);
-        robber = 0ULL;
+        robber = _mm256_setzero_si256();
     }
 };
 
@@ -225,6 +230,34 @@ void unit_tests() {
     cout.rdbuf(nullptr);
 
     {
+        Bitboard cop_graph = get_cop_starting_bitboard_for_size_k_graph(4);
+        Bitboard robber_graph = _mm256_setzero_si256();
+
+        // Test adding edges
+        cop_graph = add_edge(cop_graph, 0, 2);
+        robber_graph = add_edge(robber_graph, 1, 3);
+
+        // Test edge existence
+        assert(has_edge(cop_graph, 0, 2));
+        assert(!has_edge(cop_graph, 1, 3));
+        assert(has_edge(robber_graph, 1, 3));
+        assert(!has_edge(robber_graph, 0, 2));
+        assert(!has_edge(cop_graph, 0, 1));
+        assert(!has_edge(robber_graph, 0, 1));
+
+        // Test removing edges
+        cop_graph = remove_edge(cop_graph, 0, 2);
+        assert(!has_edge(cop_graph, 0, 2));
+
+        // Test connectivity
+        assert(!is_0_1_connected(robber_graph));
+        robber_graph = add_edge(robber_graph, 2, 3);
+        assert(!is_0_1_connected(robber_graph));
+        robber_graph = add_edge(robber_graph, 2, 0);
+        assert(is_0_1_connected(robber_graph));
+    }
+
+    {
         GameState state(6);
         state.cop = add_edge(state.cop, 0, 1);
         state.cop = add_edge(state.cop, 0, 2);
@@ -252,44 +285,7 @@ void unit_tests() {
     }
 
     {
-        // Test the make_stripes functions
-        Bitboard test                = 0b11000000'00000000'00010000'00000000'00000000'00000010'00000000'00000000ULL;
-        Bitboard expected_horizontal = 0b11111111'00000000'11111111'00000000'00000000'11111111'00000000'00000000ULL;
-        Bitboard expected_vertical   = 0b11010010'11010010'11010010'11010010'11010010'11010010'11010010'11010010ULL;
-        assert(make_row_stripes(test) == expected_horizontal);
-        assert(make_col_stripes(test) == expected_vertical);
-    }
-
-    {
-        Bitboard cop_graph = get_cop_starting_bitboard_for_size_k_graph(4);
-        Bitboard robber_graph = 0ULL;
-
-        // Test adding edges
-        cop_graph = add_edge(cop_graph, 0, 2);
-        robber_graph = add_edge(robber_graph, 1, 3);
-
-        // Test edge existence
-        assert(has_edge(cop_graph, 0, 2));
-        assert(!has_edge(cop_graph, 1, 3));
-        assert(has_edge(robber_graph, 1, 3));
-        assert(!has_edge(robber_graph, 0, 2));
-        assert(!has_edge(cop_graph, 0, 1));
-        assert(!has_edge(robber_graph, 0, 1));
-
-        // Test removing edges
-        cop_graph = remove_edge(cop_graph, 0, 2);
-        assert(!has_edge(cop_graph, 0, 2));
-
-        // Test connectivity
-        assert(!is_0_1_connected(robber_graph));
-        robber_graph = add_edge(robber_graph, 2, 3);
-        assert(!is_0_1_connected(robber_graph));
-        robber_graph = add_edge(robber_graph, 2, 0);
-        assert(is_0_1_connected(robber_graph));
-    }
-
-    {
-        Bitboard robber = add_edge(0ull, 0, 5);
+        Bitboard robber = add_edge(_mm256_setzero_si256(), 0, 5);
         assert(!is_0_1_connected(robber));
         robber = add_edge(robber, 1, 4);
         assert(!is_0_1_connected(robber));
@@ -304,7 +300,7 @@ void unit_tests() {
     }
 
     {
-        Bitboard robber = add_edge(0ull, 0, 7);
+        Bitboard robber = add_edge(_mm256_setzero_si256(), 0, 7);
         assert(!is_0_1_connected(robber));
         robber = add_edge(robber, 1, 6);
         assert(!is_0_1_connected(robber));
@@ -403,8 +399,8 @@ int main_play_mode(int argc, char* argv[]) {
     }
 
     int graph_size = atoi(argv[2]);
-    if (graph_size < 2 || graph_size > 8) {
-        cout << "Invalid graph size. Must be between 2 and 8 inclusive." << endl;
+    if (graph_size < 2 || graph_size > 16) {
+        cout << "Invalid graph size. Must be between 2 and 16 inclusive." << endl;
         return 1;
     }
 
